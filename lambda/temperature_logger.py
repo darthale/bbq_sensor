@@ -9,33 +9,22 @@ import pandas as pd
 s3_client = boto3.client("s3")
 sns_client = boto3.client('sns')
 
-S3_BUCKET = "cleverbbq"
-DATA = "temperature_data"
-FILE_EXT = "json"
-THRESHOLD = 30  # celsius
-INTERVAL_BETWEEN_ALERT = 5  # minutes
-LAST_ALERT = "last_alert.json"
+CONFIG_FILE = "bbq_config.json"
 MESSAGE_SUBJECT = "Temperature below threshold"
 MESSAGE = "Temperature value: {0}"
-SNS_TOPIC = ""
 
 FORMAT = '%(funcName)s %(asctime)s %(levelname)s %(message)s'
 logging.basicConfig(format=FORMAT)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-"""
- 1) Extracting session
- 2) Uploading to s3
- 3) Check Threshold
- 4) Invoke SNS
-"""
 
-
-def update_alert(now, s3_session):
+def update_alert(now, s3_session, config):
     updated_alert = {"time": now.strftime("%Y/%m/%d %H:%M:%S")}
-    s3_client.put_object(Bucket=S3_BUCKET,
-                         Key=DATA + "/" + s3_session + "/" + LAST_ALERT,
+    s3_client.put_object(Bucket=config["s3-bucket"],
+                         Key=config[
+                                 "temperature-data"] + "/" + s3_session + "/" +
+                             config["last-alert-file"],
                          Body=json.dunps(updated_alert))
 
 
@@ -59,8 +48,13 @@ def is_trend_decreasing(temperature_series):
 
 def lambda_handler(event, context):
     logger.info("Received data from Arduino device, processing started.")
+    logger.debug("Retrieving configurations")
 
+    config = json.loads(
+        s3_client.get_object(Bucket="cleverbbq",
+                             Key=CONFIG_FILE)["Body"].read())
     current_timestamp = str(int(time.time()))
+
     # check if event is not empty
     if bool(event):
         error_message = "Error: JSON payload provided is empty, nothing to process"
@@ -81,40 +75,43 @@ def lambda_handler(event, context):
 
     logger.info("Processing data for session {0}".format(s3_session))
 
-    # sorting the temperature series here
+    # sorting the temperature series here and uploading to s3
     sorted_event = sorted(event, key=lambda item: item["time"])
-
-    session_key = DATA + "/" + s3_session + "/"
-    s3_client.put_object(Bucket=S3_BUCKET,
+    session_key = config["temperature-data"] + "/" + s3_session + "/"
+    s3_client.put_object(Bucket=config["s3-bucket"],
                          Key=session_key + current_timestamp + ".json",
                          Body=json.dumps(sorted_event))
 
+    # temperature below threshold and decreasing trend
     decreasing = is_trend_decreasing(sorted_event)
     last_temperature_value = sorted_event[-1]
 
-    # temperature below threshold and decreasing trend
-    if last_temperature_value < THRESHOLD and decreasing:
+    if last_temperature_value < config["threshold"] and decreasing:
         logger.info("BBQ Temperature below the threshold")
-        # Checking last alert, we don't want to keep sending alert if one was just received few mins ago
+        # We don't want to keep sending alert if one was just received few mins ago
         try:
-            alert = json.loads(s3_client.get_object(Bucket=S3_BUCKET,
-                                                    Key=session_key + LAST_ALERT)[
+            # this contains the datetime of the last alert sent
+            alert = json.loads(s3_client.get_object(Bucket=config["s3-bucket"],
+                                                    Key=session_key + config[
+                                                        "last-alert-file"])[
                                    "Body"].read())
-            last_alert = datetime.strptime(alert["time"],
-                                           "%Y/%m/%d %H:%M:%S")
+            last_alert = datetime.strptime(alert["time"], "%Y/%m/%d %H:%M:%S")
             now = datetime.now()
-            if datetime.now() - last_alert > INTERVAL_BETWEEN_ALERT:
+            # if enough time elapsed between alerts
+            if datetime.now() - last_alert > config["alert-interval"]:
                 # time to alerting again
                 logger.info("Invoking SNS service")
-                update_alert(now, s3_session)
-                sns_client.publish(TopicArn=SNS_TOPIC,
-                                   Message=MESSAGE.format(temperature),
+                update_alert(now, s3_session, config)
+                sns_client.publish(TopicArn=config["sns-topic"],
+                                   Message=MESSAGE.format(
+                                       last_temperature_value),
                                    Subject=MESSAGE_SUBJECT)
-
         except Exception:
-            # we probably don't have a last_alert file yet (first time)
+            # we don't have a last_alert file yet (first time)
             logger.info("This is the first alert for the session")
-            sns_client.publish(TopicArn=SNS_TOPIC,
-                               Message=MESSAGE.format(temperature),
+            sns_client.publish(TopicArn=config["sns-topic"],
+                               Message=MESSAGE.format(last_temperature_value),
                                Subject=MESSAGE_SUBJECT)
-            update_alert(now, s3_session)
+            update_alert(now, s3_session, config)
+
+    logger.info("Temperature data recorded")
