@@ -28,22 +28,21 @@ def update_alert(now, s3_session, config):
                          Body=json.dunps(updated_alert))
 
 
-def is_trend_decreasing(temperature_series):
+def is_trend_stable(temperature_series, stability_range):
     """
-    If the last value recorded by arduino is below the threshold,
-    but the temperature is increasing, we don't send an alert
+    Elaborates temperature trend
     :param event: json with record temperature
-    :return: True if temperature is decreasing, False otherwise
+    :return: True if trend is withing stability range, False otherwise
     """
 
     df = pd.DataFrame(temperature_series)
     coeffs = np.polyfit(df["value"].index.values, list(df["value"]), 1)
     slope = coeffs[-2]
 
-    if float(slope) >= 0:
-        return False
-    else:
+    if 0 <= float(slope) <= stability_range:
         return True
+    else:
+        return False
 
 
 def lambda_handler(event, context):
@@ -83,11 +82,14 @@ def lambda_handler(event, context):
                          Body=json.dumps(sorted_event))
 
     # temperature below threshold and decreasing trend
-    decreasing = is_trend_decreasing(sorted_event)
+    stable = is_trend_stable(sorted_event, config["stability-range"])
     last_temperature_value = sorted_event[-1]
+    lower_thres = config["lower-threshold"]
+    upper_thres = config["upper-threshold"]
 
-    if last_temperature_value < config["threshold"] and decreasing:
-        logger.info("BBQ Temperature below the threshold")
+    if (lower_thres < last_temperature_value < upper_thres) and not stable:
+
+        logger.info("BBQ Temperature below the threshold and trend not stable")
         # We don't want to keep sending alert if one was just received few mins ago
         try:
             # this contains the datetime of the last alert sent
