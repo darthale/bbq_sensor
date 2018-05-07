@@ -35,7 +35,7 @@ def gen_test_temperature_data(start, interval, trend_type):
             "value": temperature}
         events.append(event)
 
-    print ( event)
+    print(event)
 
     f_path = "../dashboard/data/" + file_name
     with open(f_path, "w") as f_out:

@@ -47,25 +47,27 @@ def read_last_update(config, session_key):
         return last_alert
 
 
-def get_average_slope(config, session_key):
+def get_slope(config, session_key):
     response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=session_key)
 
     if response is not None:
         tmp_obj = response["Contents"]
-        # the response should be already ordered by LastModified
-        temperature_logs = tmp_obj[config["records-to-average"]:]
-        if len(temperature_logs) == 0:
-            logger.info("Not enough data to calculate average slope")
+        if len(tmp_obj) < config["records-to-consider"]:
+            logger.info("Not enough data to calculate slope")
             return None
 
+        temperature_logs = tmp_obj[config["records-to-consider"]:]
+        temperature_frames = []
         for log in temperature_logs:
             s3_obj = json.loads(
                 s3_client.get_object(Bucket=S3_BUCKET, Key=log["Key"])[
                     "Body"].read())
+            temperature_frames.append(pd.DataFrame(s3_obj))
 
-            df = pd.DataFrame(temperature_series)
-            coeffs = np.polyfit(df["value"].index.values, list(df["value"]), 1)
-            slope = coeffs[-2]
+        resulting_df = pd.concat(temperature_frames)
+        coeff = np.polyfit(resulting_df["value"].index.values,
+                           list(resulting_df["value"]), 1)
+        slope = coeff[-2]
 
     return float(slope)
 
@@ -74,7 +76,7 @@ def lambda_handler(event, context):
     logger.info("Received data from Arduino device, processing started.")
 
     # check if event is not empty
-    if bool(event):
+    if len(event) == 0:
         error_message = "Error: JSON payload provided is empty, nothing to process"
         logger.error(error_message)
         raise Exception(error_message)
@@ -83,8 +85,8 @@ def lambda_handler(event, context):
 
     logger.debug("Retrieving configurations")
     config = json.loads(
-        s3_client.get_object(Bucket=S3_BUCKET,
-                             Key=CONFIG_FILE)["Body"].read())
+        s3_client.get_object(Bucket=S3_BUCKET, Key=CONFIG_FILE)["Body"].read())
+
     current_timestamp = str(int(time.time()))
 
     # extract date to elaborate session
@@ -111,10 +113,12 @@ def lambda_handler(event, context):
     upper_bound = config["upper-threshold"]
     last_alert = read_last_update(config, session_key)
 
-    # this is to cover the beginning of the session, we initialise the alert table
+    # this is to cover the beginning of the session
     if last_alert == "":
         update_alert(session_key, config, False)
+        return
 
+    # this is the core part of the script
     if lower_bound < last_temperature_value < upper_bound:
         now = datetime.now()
         if now - last_alert > config["alert-interval"]:
@@ -122,8 +126,10 @@ def lambda_handler(event, context):
                 "BBQ Temperature below the threshold and last alert elapsed")
 
             logger.info("Checking temperature trend")
-            average_slope = get_average_slope(config, session_key)
-            if average_slope < config["slope_coeff"]:
+            slope = get_slope(config, session_key)
+            if slope is None:
+                logger.info("Too soon to calculate slope coefficient")
+            elif slope < config["slope-coeff"]:
                 logger.info("Invoking SNS service")
                 sns_client.publish(TopicArn=config["sns-topic"],
                                    Message=MESSAGE.format(
@@ -131,5 +137,8 @@ def lambda_handler(event, context):
                                    Subject=MESSAGE_SUBJECT)
                 logger.info("Updating last alert value")
                 update_alert(s3_session, config, True)
+            else:
+                logger.info("Temperature seems stable: {0}".format(slope))
 
     logger.info("Temperature data recorded")
+    return {"status": "OK"}
