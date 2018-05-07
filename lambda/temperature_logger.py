@@ -5,13 +5,17 @@ from datetime import datetime
 import time
 import numpy as np
 import pandas as pd
+from boto3 import resource
+from boto3.dynamodb.conditions import Key
 
 s3_client = boto3.client("s3")
-sns_client = boto3.client('sns')
+sns_client = boto3.client("sns")
+dynamodb_client = resource('dynamodb')
 
 CONFIG_FILE = "bbq_config.json"
 MESSAGE_SUBJECT = "Temperature below threshold"
 MESSAGE = "Temperature value: {0}"
+S3_BUCKET = "cleverbbq"
 
 FORMAT = '%(funcName)s %(asctime)s %(levelname)s %(message)s'
 logging.basicConfig(format=FORMAT)
@@ -19,40 +23,55 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def update_alert(now, s3_session, config):
-    updated_alert = {"time": now.strftime("%Y/%m/%d %H:%M:%S")}
-    s3_client.put_object(Bucket=config["s3-bucket"],
-                         Key=config[
-                                 "temperature-data"] + "/" + s3_session + "/" +
-                             config["last-alert-file"],
-                         Body=json.dunps(updated_alert))
-
-
-def is_trend_stable(temperature_series, stability_range):
-    """
-    Elaborates temperature trend
-    :param event: json with record temperature
-    :return: True if trend is withing stability range, False otherwise
-    """
-
-    df = pd.DataFrame(temperature_series)
-    coeffs = np.polyfit(df["value"].index.values, list(df["value"]), 1)
-    slope = coeffs[-2]
-
-    if 0 <= float(slope) <= stability_range:
-        return True
+def update_alert(session_key, config, is_update):
+    table = dynamodb_client.Table(config["alert-table"])
+    new_alert = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+    if is_update:
+        table.update_item(Key={"session": session_key},
+                          UpdateExpression="SET alert = :new_alert",
+                          ExpressionAttributeValues={
+                              ":new_alert": new_alert})
     else:
-        return False
+        table.put_item(Item={"session": session_key, "alert": new_alert})
+
+
+def read_last_update(config, session_key):
+    table = dynamodb_client.Table(config["alert-table"])
+    response = table.get_item(Key={"session": session_key})
+
+    if table.item_count == 0:
+        logger.info("No alert yet")
+        return ""
+    else:
+        last_alert = response["Item"]["alert"]
+        return last_alert
+
+
+def get_average_slope(config, session_key):
+    response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=session_key)
+
+    if response is not None:
+        tmp_obj = response["Contents"]
+        # the response should be already ordered by LastModified
+        temperature_logs = tmp_obj[config["records-to-average"]:]
+        if len(temperature_logs) == 0:
+            logger.info("Not enough data to calculate average slope")
+            return None
+
+        for log in temperature_logs:
+            s3_obj = json.loads(
+                s3_client.get_object(Bucket=S3_BUCKET, Key=log["Key"])[
+                    "Body"].read())
+
+            df = pd.DataFrame(temperature_series)
+            coeffs = np.polyfit(df["value"].index.values, list(df["value"]), 1)
+            slope = coeffs[-2]
+
+    return float(slope)
 
 
 def lambda_handler(event, context):
     logger.info("Received data from Arduino device, processing started.")
-    logger.debug("Retrieving configurations")
-
-    config = json.loads(
-        s3_client.get_object(Bucket="cleverbbq",
-                             Key=CONFIG_FILE)["Body"].read())
-    current_timestamp = str(int(time.time()))
 
     # check if event is not empty
     if bool(event):
@@ -61,6 +80,12 @@ def lambda_handler(event, context):
         raise Exception(error_message)
 
     logger.info("JSON payload contains data.")
+
+    logger.debug("Retrieving configurations")
+    config = json.loads(
+        s3_client.get_object(Bucket=S3_BUCKET,
+                             Key=CONFIG_FILE)["Body"].read())
+    current_timestamp = str(int(time.time()))
 
     # extract date to elaborate session
     session = event[0]["time"]
@@ -72,48 +97,39 @@ def lambda_handler(event, context):
         logger.error(error_message)
         raise Exception(error_message)
 
+    session_key = config["temperature-data"] + "/" + s3_session + "/"
     logger.info("Processing data for session {0}".format(s3_session))
 
     # sorting the temperature series here and uploading to s3
     sorted_event = sorted(event, key=lambda item: item["time"])
-    session_key = config["temperature-data"] + "/" + s3_session + "/"
-    s3_client.put_object(Bucket=config["s3-bucket"],
-                         Key=session_key + current_timestamp + ".json",
+    s3_client.put_object(Bucket=S3_BUCKET,
+                         Key=session_key + "log_" + current_timestamp + ".json",
                          Body=json.dumps(sorted_event))
 
-    # temperature below threshold and decreasing trend
-    stable = is_trend_stable(sorted_event, config["stability-range"])
     last_temperature_value = sorted_event[-1]
-    lower_thres = config["lower-threshold"]
-    upper_thres = config["upper-threshold"]
+    lower_bound = config["lower-threshold"]
+    upper_bound = config["upper-threshold"]
+    last_alert = read_last_update(config, session_key)
 
-    if (lower_thres < last_temperature_value < upper_thres) and not stable:
+    # this is to cover the beginning of the session, we initialise the alert table
+    if last_alert == "":
+        update_alert(session_key, config, False)
 
-        logger.info("BBQ Temperature below the threshold and trend not stable")
-        # We don't want to keep sending alert if one was just received few mins ago
-        try:
-            # this contains the datetime of the last alert sent
-            alert = json.loads(s3_client.get_object(Bucket=config["s3-bucket"],
-                                                    Key=session_key + config[
-                                                        "last-alert-file"])[
-                                   "Body"].read())
-            last_alert = datetime.strptime(alert["time"], "%Y/%m/%d %H:%M:%S")
-            now = datetime.now()
-            # if enough time elapsed between alerts
-            if datetime.now() - last_alert > config["alert-interval"]:
-                # time to alerting again
+    if lower_bound < last_temperature_value < upper_bound:
+        now = datetime.now()
+        if now - last_alert > config["alert-interval"]:
+            logger.info(
+                "BBQ Temperature below the threshold and last alert elapsed")
+
+            logger.info("Checking temperature trend")
+            average_slope = get_average_slope(config, session_key)
+            if average_slope < config["slope_coeff"]:
                 logger.info("Invoking SNS service")
-                update_alert(now, s3_session, config)
                 sns_client.publish(TopicArn=config["sns-topic"],
                                    Message=MESSAGE.format(
                                        last_temperature_value),
                                    Subject=MESSAGE_SUBJECT)
-        except Exception:
-            # we don't have a last_alert file yet (first time)
-            logger.info("This is the first alert for the session")
-            sns_client.publish(TopicArn=config["sns-topic"],
-                               Message=MESSAGE.format(last_temperature_value),
-                               Subject=MESSAGE_SUBJECT)
-            update_alert(now, s3_session, config)
+                logger.info("Updating last alert value")
+                update_alert(s3_session, config, True)
 
     logger.info("Temperature data recorded")
