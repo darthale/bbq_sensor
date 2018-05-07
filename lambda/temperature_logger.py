@@ -23,28 +23,26 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 
-def update_alert(session_key, config, is_update):
+def update_alert(s3_session, config, is_update):
     table = dynamodb_client.Table(config["alert-table"])
     new_alert = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
     if is_update:
-        table.update_item(Key={"session": session_key},
+        table.update_item(Key={"session": s3_session},
                           UpdateExpression="SET alert = :new_alert",
                           ExpressionAttributeValues={
                               ":new_alert": new_alert})
     else:
-        table.put_item(Item={"session": session_key, "alert": new_alert})
+        table.put_item(Item={"session": s3_session, "alert": new_alert})
 
 
-def read_last_update(config, session_key):
+def read_last_update(config, s3_session):
     table = dynamodb_client.Table(config["alert-table"])
-    response = table.get_item(Key={"session": session_key})
-
-    if table.item_count == 0:
-        logger.info("No alert yet")
+    response = table.get_item(Key={"session": s3_session})
+    if "Item" not in response:
         return ""
     else:
         last_alert = response["Item"]["alert"]
-        return last_alert
+        return datetime.strptime(last_alert, "%Y/%m/%d %H:%M:%S")
 
 
 def get_slope(config, session_key):
@@ -108,20 +106,21 @@ def lambda_handler(event, context):
                          Key=session_key + "log_" + current_timestamp + ".json",
                          Body=json.dumps(sorted_event))
 
-    last_temperature_value = sorted_event[-1]
+    last_temperature_value = sorted_event[-1]["value"]
     lower_bound = config["lower-threshold"]
     upper_bound = config["upper-threshold"]
-    last_alert = read_last_update(config, session_key)
+    last_alert = read_last_update(config, s3_session)
 
     # this is to cover the beginning of the session
     if last_alert == "":
-        update_alert(session_key, config, False)
+        update_alert(s3_session, config, False)
         return
 
     # this is the core part of the script
     if lower_bound < last_temperature_value < upper_bound:
         now = datetime.now()
-        if now - last_alert > config["alert-interval"]:
+        second_elapsed = (now - last_alert).seconds
+        if second_elapsed > config["alert-interval"]:
             logger.info(
                 "BBQ Temperature below the threshold and last alert elapsed")
 

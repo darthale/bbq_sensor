@@ -13,14 +13,14 @@ FILE_EXT = "json"
 s3_client = boto3.client("s3")
 
 
-def gen_test_temperature_data(start, interval, trend_type):
+def gen_test_temperature_data(start, interval, trend_type, start_temp):
     current_timestamp = str(int(time.time()))
     file_name = "log_" + current_timestamp + ".json"
 
     start_dt = datetime.datetime.strptime(start, "%Y/%m/%d %H:%M:%S")
     events = []
 
-    temperature = 51.8
+    temperature = start_temp
     for i in range(0, interval):
         start_dt = start_dt + datetime.timedelta(seconds=10)
         if trend_type == "ASCENDING":
@@ -51,5 +51,5 @@ def upload_to_s3_session(file_name, events):
                          Body=json.dumps(events))
 
 
-file_name, events = gen_test_temperature_data("2018/05/07 11:12:00", 30, "")
-upload_to_s3_session(file_name, events)
+file_name, events = gen_test_temperature_data("2018/05/07 11:12:00", 30, "", 40)
+# upload_to_s3_session(file_name, events)

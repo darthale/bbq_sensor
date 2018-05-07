@@ -27,7 +27,7 @@ The S3 bucket stores a json file that contains the configuration needed to log a
   "alert-interval": 1000,
   "slope-coeff": -0.3,
   "sns-topic": "",
-  "alert-table": "alert-history",
+  "alert-table": "alert_history",
   "temperature-data": "temperature_data"
 }
 ```
