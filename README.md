@@ -37,6 +37,6 @@ The first 5 entries are used to establish when to send an alert:
     - lower-threshold and upper-threshold: range of Celsius degrees that should trigger an alert
     - records-to-consider: how many event the script considers to calculate the slope coefficient of the temperature trend
     - alert-interval: represents the minimum time interval between 2 alerts (we don't want to send an alert if one has just been sent)
-    - slope-coeff: if the temperature trend is smaller than this coeff we want to trigger an alert
+    - slope-coeff: if the temperature trend coeff is smaller than this value we want to trigger an alert
     
 The last 3 entries are application specific configurations.

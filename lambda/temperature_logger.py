@@ -32,7 +32,8 @@ def update_alert(s3_session, config, is_update):
                           ExpressionAttributeValues={
                               ":new_alert": new_alert})
     else:
-        table.put_item(Item={"session": s3_session, "alert": new_alert})
+        table.put_item(Item={"session": s3_session, "session-start": new_alert,
+                             "alert": new_alert})
 
 
 def read_last_update(config, s3_session):
@@ -54,7 +55,7 @@ def get_slope(config, session_key):
             logger.info("Not enough data to calculate slope")
             return None
 
-        temperature_logs = tmp_obj[config["records-to-consider"]:]
+        temperature_logs = tmp_obj[-config["records-to-consider"]:]
         temperature_frames = []
         for log in temperature_logs:
             s3_obj = json.loads(
