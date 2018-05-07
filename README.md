@@ -40,3 +40,21 @@ The first 5 entries are used to establish when to send an alert:
     - slope-coeff: if the temperature trend coeff is smaller than this value we want to trigger an alert
     
 The last 3 entries are application specific configurations.
+
+## Alerting logic
+
+The below is the pseudo code that controls the logic of the alerts
+
+```pseudo
+if temperature between lower-threshold and upper-threshold:
+    if enough time from last alert:
+        is slope < slope-coeff:
+            send_alert
+```
+
+Logic explained:
+    
+    1. The first if statement checks if the temperature is in the range of what we define as low temperature through the configuration parameters lower-threshold, upper-threshold
+    2. The second if checks that enough time has elapsed from the last alert
+    3. The last if statement instead checks the temperature trend: a negative slope means that the temperature is decreasing. 
+ 
